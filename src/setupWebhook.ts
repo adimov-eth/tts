@@ -1,5 +1,4 @@
 import { config } from 'dotenv';
-import axios from 'axios';
 
 // Load environment variables
 config();
@@ -13,38 +12,36 @@ async function setupWebhook() {
     try {
         // First, delete any existing webhook
         console.log('Deleting existing webhook...');
-        const deleteResponse = await axios.get(
+        const deleteResponse = await fetch(
             `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook`
         );
-        console.log('Delete webhook response:', deleteResponse.data);
+        const deleteData = await deleteResponse.json();
+        console.log('Delete webhook response:', deleteData);
 
         // Set the new webhook
         console.log(`Setting webhook to: ${WEBHOOK_URL}`);
-        const setResponse = await axios.get(
-            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook`,
-            {
-                params: {
-                    url: WEBHOOK_URL,
-                    allowed_updates: ['message', 'edited_message', 'channel_post', 'edited_channel_post']
-                }
-            }
+        const params = new URLSearchParams({
+            url: WEBHOOK_URL,
+            allowed_updates: JSON.stringify(['message', 'edited_message', 'channel_post', 'edited_channel_post'])
+        });
+        const setResponse = await fetch(
+            `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook?${params}`
         );
-        console.log('Set webhook response:', setResponse.data);
+        const setData = await setResponse.json();
+        console.log('Set webhook response:', setData);
 
         // Verify the webhook configuration
-        const infoResponse = await axios.get(
+        const infoResponse = await fetch(
             `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo`
         );
-        console.log('Webhook info:', infoResponse.data);
+        const infoData = await infoResponse.json();
+        console.log('Webhook info:', infoData);
 
     } catch (error) {
-        if (axios.isAxiosError(error)) {
-            console.error('Error:', error.response?.data || error.message);
-        } else {
-            console.error('Error:', error);
-        }
+        const msg = error instanceof Error ? error.message : 'Unknown error';
+        console.error('Error:', msg);
         process.exit(1);
     }
 }
 
-setupWebhook().catch(console.error); 
+setupWebhook().catch(console.error);

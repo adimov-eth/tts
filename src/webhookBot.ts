@@ -1,11 +1,13 @@
 import express from 'express';
 import { Bot, Context, webhookCallback, InputFile } from 'grammy';
 import { TTSCore } from './core';
+import { DocumentService } from './documentService';
 import http from 'http';
 
 export class WebhookBot {
     private bot: Bot;
     private core: TTSCore;
+    private docs: DocumentService;
     private port: number;
     private webhookUrl: string;
     private server!: http.Server;
@@ -13,6 +15,7 @@ export class WebhookBot {
     constructor(token: string, openAIApiKey: string, port: number, domain: string, path: string) {
         this.bot = new Bot(token);
         this.core = new TTSCore(openAIApiKey);
+        this.docs = new DocumentService();
         this.port = port;
         this.webhookUrl = `https://${domain}${path}`;
 
@@ -84,7 +87,10 @@ export class WebhookBot {
         // Text messages (not commands)
         this.bot.on('message:text', (ctx) => {
             const text = ctx.message.text;
-            if (text.startsWith('/')) return; // Skip unhandled commands
+            if (text.startsWith('/')) {
+                return ctx.reply('Unknown command. Use /help for available commands.');
+            }
+            if (!text.trim()) return; // Skip empty messages
             return this.processAndSend(ctx, text, false);
         });
 
@@ -105,15 +111,126 @@ export class WebhookBot {
             }
         });
 
+        // Document uploads
+        this.bot.on('message:document', (ctx) => {
+            return this.processDocument(ctx);
+        });
+
         this.bot.catch((err) => console.error('Bot error:', err));
     }
 
-    private async processAndSend(ctx: Context, text: string, useAI: boolean) {
+    private async processDocument(ctx: Context): Promise<void> {
+        const doc = ctx.message?.document;
+        if (!doc) return;
+
+        const format = this.docs.detectFormat(doc.file_name || '', doc.mime_type);
+
+        if (!format) {
+            const supported = this.docs.getSupportedFormats().join(', ');
+            await ctx.reply(`Unsupported format. Please send: ${supported}`);
+            return;
+        }
+
+        if (doc.file_size && doc.file_size > 20 * 1024 * 1024) {
+            await ctx.reply('File too large. Maximum 20MB.');
+            return;
+        }
+
+        let statusMsg: { chat: { id: number }; message_id: number } | undefined;
+
         try {
-            await ctx.reply('Processing...');
-            const { audio } = await this.core.generateSpeech(ctx.chat!.id, text, useAI);
-            return ctx.replyWithVoice(new InputFile(new Uint8Array(audio), 'speech.mp3'));
+            statusMsg = await ctx.reply('Downloading document...');
+
+            // Download file
+            const file = await ctx.getFile();
+            const fileUrl = `https://api.telegram.org/file/bot${this.bot.token}/${file.file_path}`;
+            const response = await fetch(fileUrl);
+            const buffer = Buffer.from(await response.arrayBuffer());
+
+            await ctx.api.editMessageText(
+                statusMsg.chat.id,
+                statusMsg.message_id,
+                'Parsing document...'
+            ).catch(() => {});
+
+            // Parse document
+            const parsed = await this.docs.parseBuffer(buffer, format, doc.file_name);
+
+            if (!parsed.text || parsed.text.length === 0) {
+                throw new Error('Could not extract text from document');
+            }
+
+            const charCount = parsed.text.length;
+            await ctx.api.editMessageText(
+                statusMsg.chat.id,
+                statusMsg.message_id,
+                `Extracted ${charCount} characters. Generating audio...`
+            ).catch(() => {});
+
+            // Progress callback
+            const onProgress = async (current: number, total: number, message: string) => {
+                if (statusMsg && total > 1) {
+                    await ctx.api.editMessageText(
+                        statusMsg.chat.id,
+                        statusMsg.message_id,
+                        message
+                    ).catch(() => {});
+                }
+            };
+
+            if (!ctx.chat) throw new Error('No chat context');
+            const { audio } = await this.core.generateSpeech(ctx.chat.id, parsed.text, false, onProgress);
+
+            // Delete status message
+            if (statusMsg) {
+                await ctx.api.deleteMessage(statusMsg.chat.id, statusMsg.message_id).catch(() => {});
+            }
+
+            // Send audio
+            await ctx.replyWithVoice(
+                new InputFile(new Uint8Array(audio), 'speech.opus'),
+                { caption: parsed.title ? `📄 ${parsed.title}` : undefined }
+            );
         } catch (error) {
+            if (statusMsg) {
+                await ctx.api.deleteMessage(statusMsg.chat.id, statusMsg.message_id).catch(() => {});
+            }
+            const msg = error instanceof Error ? error.message : 'Unknown error';
+            await ctx.reply(`Error processing document: ${msg}`);
+        }
+    }
+
+    private async processAndSend(ctx: Context, text: string, useAI: boolean) {
+        let statusMsg: { chat: { id: number }; message_id: number } | undefined;
+
+        try {
+            statusMsg = await ctx.reply('Processing...');
+
+            // Progress callback updates the status message
+            const onProgress = async (current: number, total: number, message: string) => {
+                if (statusMsg && total > 1) {
+                    await ctx.api.editMessageText(
+                        statusMsg.chat.id,
+                        statusMsg.message_id,
+                        message
+                    ).catch(() => {}); // Ignore edit failures
+                }
+            };
+
+            if (!ctx.chat) throw new Error('No chat context');
+            const { audio } = await this.core.generateSpeech(ctx.chat.id, text, useAI, onProgress);
+
+            // Delete status message before sending voice
+            if (statusMsg) {
+                await ctx.api.deleteMessage(statusMsg.chat.id, statusMsg.message_id).catch(() => {});
+            }
+
+            return ctx.replyWithVoice(new InputFile(new Uint8Array(audio), 'speech.opus'));
+        } catch (error) {
+            // Delete status message on error
+            if (statusMsg) {
+                await ctx.api.deleteMessage(statusMsg.chat.id, statusMsg.message_id).catch(() => {});
+            }
             const msg = error instanceof Error ? error.message : 'Unknown error';
             return ctx.reply(`Error: ${msg}`);
         }

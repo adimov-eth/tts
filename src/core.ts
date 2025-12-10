@@ -1,11 +1,11 @@
-import { OpenAIService } from './openaiService';
+import { OpenAIService, ProgressCallback } from './openaiService';
 import {
     getPrefs, setVoice, setSpeed, setInstructions,
     isValidVoice, AVAILABLE_VOICES, UserPrefs, Voice
 } from './userPreferences';
 
 export { getPrefs, setVoice, setSpeed, setInstructions, isValidVoice, AVAILABLE_VOICES };
-export type { UserPrefs, Voice };
+export type { UserPrefs, Voice, ProgressCallback };
 
 export interface TTSResult {
     audio: Buffer;
@@ -24,26 +24,25 @@ export class TTSCore {
     }
 
     // Generate speech with user's preferences
-    async generateSpeech(chatId: number, text: string, useAI: boolean = false): Promise<TTSResult> {
-        if (text.length > 4096) {
-            throw new Error('Text too long. Maximum 4096 characters.');
-        }
-
+    // Long text is automatically chunked and concatenated
+    async generateSpeech(
+        chatId: number,
+        text: string,
+        useAI: boolean = false,
+        onProgress?: ProgressCallback
+    ): Promise<TTSResult> {
         const prefs = getPrefs(chatId);
 
         let processedText = text;
         if (useAI) {
             processedText = await this.openAI.transformText(text);
-            // Validate again after AI transform
-            if (processedText.length > 4096) {
-                processedText = processedText.slice(0, 4096);
-            }
         }
 
         const audio = await this.openAI.generateSpeech(
             processedText,
             prefs.voice,
-            { speed: prefs.speed, instructions: prefs.instructions }
+            { speed: prefs.speed, instructions: prefs.instructions },
+            onProgress
         );
 
         return { audio, prefs };
@@ -60,7 +59,7 @@ export class TTSCore {
         return {
             message:
                 'Welcome to the TTS Bot!\n\n' +
-                'Send me any text and I\'ll convert it to speech.\n\n' +
+                'Send me text or documents and I\'ll convert them to speech.\n\n' +
                 'Commands:\n' +
                 '/tts <text> - Convert text to speech\n' +
                 '/ttsai <text> - Convert with AI enhancement\n' +
@@ -70,6 +69,7 @@ export class TTSCore {
                 '/tone <instruction> - Set tone/accent\n' +
                 '/settings - Show current settings\n' +
                 '/help - Show this help message\n\n' +
+                'Supported files: PDF, DOCX, TXT, MD\n\n' +
                 `Current: ${prefs.voice}, speed ${prefs.speed}x`
         };
     }
@@ -88,7 +88,9 @@ export class TTSCore {
                 '/tone off - Clear tone instruction\n' +
                 '/settings - Show current settings\n' +
                 '/help - Show this help message\n\n' +
-                'Or simply send any text message to convert it to speech!'
+                'Send any text message to convert it to speech.\n' +
+                'Send documents (PDF, DOCX, TXT, MD) to convert to audio.\n' +
+                'Long texts are automatically chunked and concatenated.'
         };
     }
 

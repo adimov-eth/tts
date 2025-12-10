@@ -1,77 +1,91 @@
-import axios, { AxiosError } from 'axios';
+import OpenAI from 'openai';
+import type { SpeechCreateParams } from 'openai/resources/audio/speech';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 
+export type ProgressCallback = (current: number, total: number, message: string) => void;
+export type Voice = SpeechCreateParams['voice'];
+
 export class OpenAIService {
-    private readonly apiKey: string;
-    private readonly defaultVoice: string = 'alloy';
-    private readonly maxChunkLength: number = 4000; // Maximum safe length for API processing
+    private readonly client: OpenAI;
+    private readonly defaultVoice: Voice = 'alloy';
+    private readonly maxChunkLength: number = 3800; // Safe limit for TTS API (research says ~4000 chars)
 
     constructor(apiKey: string) {
-        this.apiKey = apiKey;
+        this.client = new OpenAI({
+            apiKey,
+            maxRetries: 3,
+            timeout: 60000,
+        });
     }
 
     private splitTextIntoChunks(text: string): string[] {
+        if (text.length <= this.maxChunkLength) {
+            return [text];
+        }
+
         const chunks: string[] = [];
-        let currentChunk = '';
-        
-        // Split by sentences (basic implementation)
-        const sentences = text.split(/(?<=[.!?])\s+/);
-        
-        for (const sentence of sentences) {
-            if ((currentChunk + sentence).length > this.maxChunkLength) {
-                if (currentChunk) {
-                    chunks.push(currentChunk.trim());
-                    currentChunk = '';
-                }
-                // If a single sentence is too long, split it by commas
-                if (sentence.length > this.maxChunkLength) {
-                    const subParts = sentence.split(/(?<=,)\s+/);
-                    for (const part of subParts) {
-                        if (part.length > this.maxChunkLength) {
-                            // If still too long, split into fixed-size chunks
-                            for (let i = 0; i < part.length; i += this.maxChunkLength) {
-                                chunks.push(part.slice(i, i + this.maxChunkLength).trim());
-                            }
-                        } else {
-                            chunks.push(part.trim());
-                        }
-                    }
-                } else {
-                    currentChunk = sentence;
-                }
-            } else {
-                currentChunk += (currentChunk ? ' ' : '') + sentence;
+        let remaining = text;
+
+        while (remaining.length > 0) {
+            if (remaining.length <= this.maxChunkLength) {
+                chunks.push(remaining.trim());
+                break;
             }
+
+            // Find best split point within maxChunkLength
+            let splitAt = this.maxChunkLength;
+            const segment = remaining.slice(0, this.maxChunkLength);
+
+            // Priority 1: Paragraph break
+            const paragraphBreak = segment.lastIndexOf('\n\n');
+            if (paragraphBreak > this.maxChunkLength * 0.5) {
+                splitAt = paragraphBreak + 2;
+            } else {
+                // Priority 2: Sentence end
+                const sentenceEnd = Math.max(
+                    segment.lastIndexOf('. '),
+                    segment.lastIndexOf('! '),
+                    segment.lastIndexOf('? ')
+                );
+                if (sentenceEnd > this.maxChunkLength * 0.5) {
+                    splitAt = sentenceEnd + 2;
+                } else {
+                    // Priority 3: Clause break
+                    const clauseBreak = Math.max(
+                        segment.lastIndexOf(', '),
+                        segment.lastIndexOf('; '),
+                        segment.lastIndexOf(': ')
+                    );
+                    if (clauseBreak > this.maxChunkLength * 0.5) {
+                        splitAt = clauseBreak + 2;
+                    }
+                    // Else: hard split at maxChunkLength
+                }
+            }
+
+            chunks.push(remaining.slice(0, splitAt).trim());
+            remaining = remaining.slice(splitAt);
         }
-        
-        if (currentChunk) {
-            chunks.push(currentChunk.trim());
-        }
-        
-        return chunks;
+
+        return chunks.filter(c => c.length > 0);
     }
 
     async transformText(text: string): Promise<string> {
-        try {
-            console.log('OpenAI Service - Transforming text:', text);
-            
-            // Split text into manageable chunks
-            const chunks = this.splitTextIntoChunks(text);
-            const transformedChunks: string[] = [];
-            
-            // Process each chunk
-            for (const chunk of chunks) {
-                const response = await axios.post(
-                    'https://api.openai.com/v1/chat/completions',
+        console.log('OpenAI Service - Transforming text:', text.substring(0, 100) + '...');
+
+        const chunks = this.splitTextIntoChunks(text);
+        const transformedChunks: string[] = [];
+
+        for (const chunk of chunks) {
+            const response = await this.client.chat.completions.create({
+                model: 'gpt-4o-mini',
+                temperature: 0.1,
+                messages: [
                     {
-                        model: 'gpt-4',
-                        temperature: 0.1,
-                        messages: [
-                            {
-                                role: 'system',
-                                content: `You are a TTS preprocessor that ONLY formats text for speech synthesis.
+                        role: 'system',
+                        content: `You are a TTS preprocessor that ONLY formats text for speech synthesis.
 DO NOT generate ANY new content or responses.
 DO NOT engage in conversation or answer questions.
 DO NOT translate or modify the meaning.
@@ -86,193 +100,191 @@ DO NOT change the language, meaning, or generate any new content.
 
 Example Input: "привет как дела"
 Example Output: "Привет, как дела?"
-(Only added basic punctuation, kept exact same text)
 
 Example Input: "The price is $1234.56"
 Example Output: "The price is 1,234 dollars and 56 cents"
-(Only formatted numbers for better TTS reading)
 
-REMEMBER: You are just a text formatter for TTS.
-You are NOT a chatbot. DO NOT generate responses.`
-                            },
-                            {
-                                role: 'user',
-                                content: chunk
-                            }
-                        ],
+REMEMBER: You are just a text formatter for TTS. DO NOT generate responses.`
                     },
-                    {
-                        headers: {
-                            'Authorization': `Bearer ${this.apiKey}`,
-                            'Content-Type': 'application/json',
-                        },
-                    }
-                );
-                
-                const transformedChunk = response.data.choices[0].message.content.trim();
-                transformedChunks.push(transformedChunk);
+                    { role: 'user', content: chunk }
+                ],
+            });
+
+            const content = response.choices[0].message.content;
+            if (content) {
+                transformedChunks.push(content.trim());
             }
-            
-            // Combine transformed chunks
-            const result = transformedChunks.join(' ');
-            console.log('OpenAI Service - Transformed result:', result);
-            return result;
-        } catch (error) {
-            if (axios.isAxiosError(error)) {
-                console.error('OpenAI Service - API Error:', {
-                    status: error.response?.status,
-                    statusText: error.response?.statusText,
-                    data: error.response?.data,
-                    headers: error.response?.headers
-                });
-            } else {
-                console.error('OpenAI Service - Unknown Error:', error);
-            }
-            throw new Error('Failed to transform text with OpenAI');
         }
+
+        const result = transformedChunks.join(' ');
+        console.log('OpenAI Service - Transformed result length:', result.length);
+        return result;
     }
 
     async generateSpeech(
         text: string,
-        voice: string = this.defaultVoice,
+        voice: Voice = this.defaultVoice,
         options: { speed?: number; instructions?: string } = {},
-        retries = 3
+        onProgress?: ProgressCallback
     ): Promise<Buffer> {
-        // Sanitize input - replace problematic characters that may cause API issues
+        // Sanitize input
         const sanitizedText = text
-            .replace(/[\u0000-\u001F\u007F-\u009F]/g, '') // Remove control characters
+            .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
             .trim();
 
-        const { speed = 1.0, instructions } = options;
-
-        for (let attempt = 1; attempt <= retries; attempt++) {
-            try {
-                console.log('OpenAI Service - Generating speech:', {
-                    text: sanitizedText.substring(0, 100) + (sanitizedText.length > 100 ? '...' : ''),
-                    voice,
-                    speed,
-                    hasInstructions: !!instructions,
-                    textLength: sanitizedText.length,
-                    attempt
-                });
-
-                const requestBody: Record<string, unknown> = {
-                    model: 'gpt-4o-mini-tts',
-                    input: sanitizedText,
-                    voice: voice,
-                    speed: speed,
-                };
-
-                // instructions only works with gpt-4o-mini-tts
-                if (instructions) {
-                    requestBody.instructions = instructions;
-                }
-
-                const response = await axios.post(
-                    'https://api.openai.com/v1/audio/speech',
-                    requestBody,
-                    {
-                        headers: {
-                            'Authorization': `Bearer ${this.apiKey}`,
-                            'Content-Type': 'application/json',
-                        },
-                        responseType: 'arraybuffer',
-                    }
-                );
-
-                console.log('OpenAI Service - Response size:', response.data.length);
-                return Buffer.from(response.data);
-            } catch (error) {
-                if (axios.isAxiosError(error)) {
-                    const status = error.response?.status;
-                    console.error(`OpenAI Service - TTS API Error (attempt ${attempt}/${retries}):`, {
-                        status,
-                        statusText: error.response?.statusText,
-                        data: this.parseErrorResponse(error.response?.data),
-                    });
-
-                    // Retry on 5xx errors (server issues)
-                    if (status && status >= 500 && attempt < retries) {
-                        const delay = Math.pow(2, attempt) * 1000; // Exponential backoff
-                        console.log(`Retrying in ${delay}ms...`);
-                        await new Promise(resolve => setTimeout(resolve, delay));
-                        continue;
-                    }
-
-                    throw new Error(`OpenAI TTS API error: ${error.response?.statusText || 'Unknown error'}`);
-                } else {
-                    console.error('OpenAI Service - Unknown TTS Error:', error);
-                    throw new Error('Failed to generate speech with OpenAI: Unknown error');
-                }
-            }
+        if (!sanitizedText) {
+            throw new Error('Text is empty after sanitization');
         }
-        throw new Error('Max retries exceeded for TTS generation');
+
+        const { speed = 1.0, instructions } = options;
+        const chunks = this.splitTextIntoChunks(sanitizedText);
+
+        console.log('OpenAI Service - Generating speech:', {
+            textLength: sanitizedText.length,
+            chunks: chunks.length,
+            voice,
+            speed,
+            hasInstructions: !!instructions,
+        });
+
+        // Single chunk - no concatenation needed
+        if (chunks.length === 1) {
+            return this.generateSingleChunk(chunks[0], voice, speed, instructions);
+        }
+
+        // Multiple chunks - generate and concatenate
+        const tempDir = path.join(os.tmpdir(), `tts-${Date.now()}`);
+        await fs.mkdir(tempDir, { recursive: true });
+
+        try {
+            const audioFiles: string[] = [];
+
+            for (let i = 0; i < chunks.length; i++) {
+                onProgress?.(i + 1, chunks.length, `Generating audio ${i + 1}/${chunks.length}...`);
+
+                const audio = await this.generateSingleChunk(chunks[i], voice, speed, instructions);
+                const filePath = path.join(tempDir, `chunk-${i.toString().padStart(4, '0')}.opus`);
+                await fs.writeFile(filePath, new Uint8Array(audio));
+                audioFiles.push(filePath);
+            }
+
+            onProgress?.(chunks.length, chunks.length, 'Concatenating audio...');
+
+            // Concatenate using ffmpeg
+            const outputPath = path.join(tempDir, 'output.opus');
+            await this.concatenateAudio(audioFiles, outputPath);
+
+            const result = await fs.readFile(outputPath);
+            return result;
+        } finally {
+            // Cleanup temp directory
+            await fs.rm(tempDir, { recursive: true, force: true }).catch(console.error);
+        }
+    }
+
+    private async generateSingleChunk(
+        text: string,
+        voice: Voice,
+        speed: number,
+        instructions?: string
+    ): Promise<Buffer> {
+        const response = await this.client.audio.speech.create({
+            model: 'gpt-4o-mini-tts',
+            voice,
+            input: text,
+            response_format: 'opus', // Native Telegram format - no conversion needed
+            speed,
+            ...(instructions && { instructions }),
+        });
+
+        const arrayBuffer = await response.arrayBuffer();
+        return Buffer.from(arrayBuffer);
+    }
+
+    private async checkFFmpegAvailable(): Promise<void> {
+        try {
+            const proc = Bun.spawn(['ffmpeg', '-version'], {
+                stdout: 'pipe',
+                stderr: 'pipe',
+            });
+            await proc.exited;
+
+            if (proc.exitCode !== 0) {
+                throw new Error('ffmpeg command failed');
+            }
+        } catch (error) {
+            throw new Error(
+                'FFmpeg is not available. Please install it:\n' +
+                '  macOS: brew install ffmpeg\n' +
+                '  Ubuntu/Debian: apt-get install ffmpeg\n' +
+                '  Windows: https://ffmpeg.org/download.html'
+            );
+        }
+    }
+
+    private async concatenateAudio(inputFiles: string[], outputPath: string): Promise<void> {
+        // Check ffmpeg availability before attempting concatenation
+        await this.checkFFmpegAvailable();
+
+        // Create file list for ffmpeg concat demuxer
+        const listPath = outputPath.replace('.opus', '-list.txt');
+        const listContent = inputFiles.map(f => `file '${f}'`).join('\n');
+        await fs.writeFile(listPath, listContent);
+
+        const proc = Bun.spawn([
+            'ffmpeg',
+            '-y', // Overwrite output
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', listPath,
+            '-c', 'copy', // No re-encoding
+            outputPath
+        ], {
+            stdout: 'pipe',
+            stderr: 'pipe',
+        });
+
+        await proc.exited;
+
+        if (proc.exitCode !== 0) {
+            const stderr = await new Response(proc.stderr).text();
+            throw new Error(`FFmpeg concat failed: ${stderr}`);
+        }
+
+        // Cleanup list file
+        await fs.unlink(listPath).catch(() => {});
     }
 
     async transcribeAudio(audioUrl: string): Promise<string> {
+        console.log('OpenAI Service - Downloading audio file:', audioUrl);
+
+        // Download the audio file
+        const response = await fetch(audioUrl);
+        const arrayBuffer = await response.arrayBuffer();
+
+        // Save to temporary file
+        const tempFile = path.join(os.tmpdir(), `voice-${Date.now()}.ogg`);
+        await fs.writeFile(tempFile, new Uint8Array(arrayBuffer));
+
         try {
-            console.log('OpenAI Service - Downloading audio file:', audioUrl);
-            
-            // Download the audio file
-            const audioResponse = await axios.get(audioUrl, {
-                responseType: 'arraybuffer'
+            console.log('OpenAI Service - Transcribing audio');
+
+            const transcription = await this.client.audio.transcriptions.create({
+                file: await this.createFileFromPath(tempFile),
+                model: 'whisper-1',
+                response_format: 'text',
             });
-            
-            // Save to temporary file
-            const tempFile = path.join(os.tmpdir(), `voice-${Date.now()}.ogg`);
-            await fs.writeFile(tempFile, new Uint8Array(audioResponse.data));
 
-            try {
-                console.log('OpenAI Service - Transcribing audio');
-                
-                // Create form data
-                const formData = new FormData();
-                formData.append('file', new Blob([await fs.readFile(tempFile)]), 'audio.ogg');
-                formData.append('model', 'whisper-1');
-                formData.append('response_format', 'text');
-
-                // Send to OpenAI
-                const response = await axios.post(
-                    'https://api.openai.com/v1/audio/transcriptions',
-                    formData,
-                    {
-                        headers: {
-                            'Authorization': `Bearer ${this.apiKey}`,
-                            'Content-Type': 'multipart/form-data',
-                        },
-                    }
-                );
-
-                console.log('OpenAI Service - Transcription complete');
-                return response.data;
-            } finally {
-                // Clean up temp file
-                await fs.unlink(tempFile).catch(console.error);
-            }
-        } catch (error) {
-            if (axios.isAxiosError(error)) {
-                console.error('OpenAI Service - Transcription API Error:', {
-                    status: error.response?.status,
-                    statusText: error.response?.statusText,
-                    data: error.response?.data,
-                    headers: error.response?.headers
-                });
-                throw new Error(`OpenAI Transcription API error: ${error.response?.statusText || 'Unknown error'}`);
-            } else {
-                console.error('OpenAI Service - Unknown Transcription Error:', error);
-                throw new Error('Failed to transcribe audio with OpenAI: Unknown error');
-            }
+            console.log('OpenAI Service - Transcription complete');
+            return transcription as unknown as string; // response_format: 'text' returns string
+        } finally {
+            await fs.unlink(tempFile).catch(console.error);
         }
     }
 
-    private parseErrorResponse(data: any): any {
-        if (data instanceof Buffer) {
-            try {
-                return JSON.parse(data.toString());
-            } catch {
-                return data.toString();
-            }
-        }
-        return data;
+    private async createFileFromPath(filePath: string): Promise<File> {
+        const buffer = await fs.readFile(filePath);
+        const fileName = path.basename(filePath);
+        return new File([buffer], fileName, { type: 'audio/ogg' });
     }
 } 
