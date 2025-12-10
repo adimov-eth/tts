@@ -84,8 +84,12 @@ export class TTSBot {
             this.processAndSend(msg.chat.id, text, true);
         });
 
-        // Regular text messages (not commands)
+        // Regular text messages (not commands, not other message types)
         this.bot.on('message', (msg) => {
+            // Skip if it's a document, voice, or other non-text message
+            if (msg.document || msg.voice || msg.photo || msg.video || msg.audio) {
+                return;
+            }
             if (msg.text && !msg.text.startsWith('/') && msg.text.trim()) {
                 this.processAndSend(msg.chat.id, msg.text, false);
             }
