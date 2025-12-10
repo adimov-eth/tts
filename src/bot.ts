@@ -11,7 +11,22 @@ export class TTSBot {
         this.bot = new TelegramBot(telegramToken, { polling: true });
         this.core = new TTSCore(openAIApiKey);
         this.docs = new DocumentService();
+        this.setupCommands();
         this.setupHandlers();
+    }
+
+    private async setupCommands(): Promise<void> {
+        await this.bot.setMyCommands([
+            { command: 'start', description: 'Start the bot' },
+            { command: 'help', description: 'Show help' },
+            { command: 'tts', description: 'Convert text to speech' },
+            { command: 'ttsai', description: 'Convert with AI enhancement' },
+            { command: 'voices', description: 'List available voices' },
+            { command: 'voice', description: 'Set voice' },
+            { command: 'speed', description: 'Set speed (0.25-4.0)' },
+            { command: 'tone', description: 'Set tone instruction' },
+            { command: 'settings', description: 'Show current settings' },
+        ]);
     }
 
     private setupHandlers(): void {

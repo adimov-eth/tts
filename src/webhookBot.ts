@@ -27,6 +27,17 @@ export class WebhookBot {
 
     private async init() {
         await this.bot.init();
+        await this.bot.api.setMyCommands([
+            { command: 'start', description: 'Start the bot' },
+            { command: 'help', description: 'Show help' },
+            { command: 'tts', description: 'Convert text to speech' },
+            { command: 'ttsai', description: 'Convert with AI enhancement' },
+            { command: 'voices', description: 'List available voices' },
+            { command: 'voice', description: 'Set voice' },
+            { command: 'speed', description: 'Set speed (0.25-4.0)' },
+            { command: 'tone', description: 'Set tone instruction' },
+            { command: 'settings', description: 'Show current settings' },
+        ]);
         console.log('Bot initialized');
         this.setupHandlers();
         this.setupServer();
