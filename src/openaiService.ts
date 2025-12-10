@@ -132,48 +132,81 @@ You are NOT a chatbot. DO NOT generate responses.`
         }
     }
 
-    async generateSpeech(text: string, voice: string = this.defaultVoice): Promise<Buffer> {
-        try {
-            console.log('OpenAI Service - Generating speech:', {
-                text,
-                voice,
-                textLength: text.length
-            });
+    async generateSpeech(
+        text: string,
+        voice: string = this.defaultVoice,
+        options: { speed?: number; instructions?: string } = {},
+        retries = 3
+    ): Promise<Buffer> {
+        // Sanitize input - replace problematic characters that may cause API issues
+        const sanitizedText = text
+            .replace(/[\u0000-\u001F\u007F-\u009F]/g, '') // Remove control characters
+            .trim();
 
-            const response = await axios.post(
-                'https://api.openai.com/v1/audio/speech',
-                {
-                    model: 'tts-1',
-                    input: text,
-                    voice: voice,
-                },
-                {
-                    headers: {
-                        'Authorization': `Bearer ${this.apiKey}`,
-                        'Content-Type': 'application/json',
-                    },
-                    responseType: 'arraybuffer',
-                }
-            );
+        const { speed = 1.0, instructions } = options;
 
-            console.log('OpenAI Service - Response headers:', response.headers);
-            console.log('OpenAI Service - Response size:', response.data.length);
-
-            return Buffer.from(response.data);
-        } catch (error) {
-            if (axios.isAxiosError(error)) {
-                console.error('OpenAI Service - TTS API Error:', {
-                    status: error.response?.status,
-                    statusText: error.response?.statusText,
-                    data: this.parseErrorResponse(error.response?.data),
-                    headers: error.response?.headers
+        for (let attempt = 1; attempt <= retries; attempt++) {
+            try {
+                console.log('OpenAI Service - Generating speech:', {
+                    text: sanitizedText.substring(0, 100) + (sanitizedText.length > 100 ? '...' : ''),
+                    voice,
+                    speed,
+                    hasInstructions: !!instructions,
+                    textLength: sanitizedText.length,
+                    attempt
                 });
-                throw new Error(`OpenAI TTS API error: ${error.response?.statusText || 'Unknown error'}`);
-            } else {
-                console.error('OpenAI Service - Unknown TTS Error:', error);
-                throw new Error('Failed to generate speech with OpenAI: Unknown error');
+
+                const requestBody: Record<string, unknown> = {
+                    model: 'gpt-4o-mini-tts',
+                    input: sanitizedText,
+                    voice: voice,
+                    speed: speed,
+                };
+
+                // instructions only works with gpt-4o-mini-tts
+                if (instructions) {
+                    requestBody.instructions = instructions;
+                }
+
+                const response = await axios.post(
+                    'https://api.openai.com/v1/audio/speech',
+                    requestBody,
+                    {
+                        headers: {
+                            'Authorization': `Bearer ${this.apiKey}`,
+                            'Content-Type': 'application/json',
+                        },
+                        responseType: 'arraybuffer',
+                    }
+                );
+
+                console.log('OpenAI Service - Response size:', response.data.length);
+                return Buffer.from(response.data);
+            } catch (error) {
+                if (axios.isAxiosError(error)) {
+                    const status = error.response?.status;
+                    console.error(`OpenAI Service - TTS API Error (attempt ${attempt}/${retries}):`, {
+                        status,
+                        statusText: error.response?.statusText,
+                        data: this.parseErrorResponse(error.response?.data),
+                    });
+
+                    // Retry on 5xx errors (server issues)
+                    if (status && status >= 500 && attempt < retries) {
+                        const delay = Math.pow(2, attempt) * 1000; // Exponential backoff
+                        console.log(`Retrying in ${delay}ms...`);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        continue;
+                    }
+
+                    throw new Error(`OpenAI TTS API error: ${error.response?.statusText || 'Unknown error'}`);
+                } else {
+                    console.error('OpenAI Service - Unknown TTS Error:', error);
+                    throw new Error('Failed to generate speech with OpenAI: Unknown error');
+                }
             }
         }
+        throw new Error('Max retries exceeded for TTS generation');
     }
 
     async transcribeAudio(audioUrl: string): Promise<string> {
@@ -187,7 +220,7 @@ You are NOT a chatbot. DO NOT generate responses.`
             
             // Save to temporary file
             const tempFile = path.join(os.tmpdir(), `voice-${Date.now()}.ogg`);
-            await fs.writeFile(tempFile, Buffer.from(audioResponse.data));
+            await fs.writeFile(tempFile, new Uint8Array(audioResponse.data));
 
             try {
                 console.log('OpenAI Service - Transcribing audio');

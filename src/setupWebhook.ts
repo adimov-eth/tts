@@ -5,8 +5,8 @@ import axios from 'axios';
 config();
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
-const DOMAIN = 'tts.bkk.lol';
-const WEBHOOK_PATH = `/webhook/${TELEGRAM_BOT_TOKEN}`;
+const DOMAIN = process.env.DOMAIN || 'localhost';
+const WEBHOOK_PATH = process.env.WEBHOOK_PATH || '/webhook';
 const WEBHOOK_URL = `https://${DOMAIN}${WEBHOOK_PATH}`;
 
 async function setupWebhook() {
