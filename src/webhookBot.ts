@@ -2,6 +2,8 @@ import express from 'express';
 import { Bot, Context, webhookCallback, InputFile } from 'grammy';
 import { TTSCore } from './core';
 import { DocumentService } from './documentService';
+import { createQueue, createWorker, JobData } from './queue';
+import { Queue, Worker } from 'bullmq';
 import http from 'http';
 
 export class WebhookBot {
@@ -11,6 +13,8 @@ export class WebhookBot {
     private port: number;
     private webhookUrl: string;
     private server!: http.Server;
+    private queue!: Queue<JobData>;
+    private worker!: Worker<JobData>;
 
     constructor(token: string, openAIApiKey: string, port: number, domain: string, path: string) {
         this.bot = new Bot(token);
@@ -38,13 +42,18 @@ export class WebhookBot {
             { command: 'tone', description: 'Set tone instruction' },
             { command: 'settings', description: 'Show current settings' },
         ]);
-        console.log('Bot initialized');
+
+        // Initialize queue and worker
+        this.queue = createQueue();
+        this.worker = createWorker(this.bot, this.core, this.docs);
+
+        console.log('Bot initialized with queue');
         this.setupHandlers();
         this.setupServer();
     }
 
     private setupHandlers() {
-        // Commands
+        // Commands that don't need queueing (instant responses)
         this.bot.command('start', (ctx) => {
             const result = this.core.handleStart(ctx.chat.id);
             return ctx.reply(result.message);
@@ -83,56 +92,60 @@ export class WebhookBot {
             return ctx.reply(result.message);
         });
 
-        this.bot.command('tts', (ctx) => {
+        // TTS commands - queue for async processing
+        this.bot.command('tts', async (ctx) => {
             const text = ctx.match?.toString().trim();
             if (!text) return ctx.reply('Usage: /tts <text>');
-            return this.processAndSend(ctx, text, false);
+            return this.queueTTS(ctx, text, false);
         });
 
-        this.bot.command('ttsai', (ctx) => {
+        this.bot.command('ttsai', async (ctx) => {
             const text = ctx.match?.toString().trim();
             if (!text) return ctx.reply('Usage: /ttsai <text>');
-            return this.processAndSend(ctx, text, true);
+            return this.queueTTS(ctx, text, true);
         });
 
-        // Text messages (not commands)
-        this.bot.on('message:text', (ctx) => {
+        // Text messages (not commands) - queue for processing
+        this.bot.on('message:text', async (ctx) => {
             const text = ctx.message.text;
             if (text.startsWith('/')) {
                 return ctx.reply('Unknown command. Use /help for available commands.');
             }
-            if (!text.trim()) return; // Skip empty messages
-            return this.processAndSend(ctx, text, false);
+            if (!text.trim()) return;
+            return this.queueTTS(ctx, text, false);
         });
 
-        // Voice messages
+        // Voice messages - queue for processing
         this.bot.on('message:voice', async (ctx) => {
-            try {
-                await ctx.reply('Transcribing...');
-                const file = await ctx.getFile();
-                const fileUrl = `https://api.telegram.org/file/bot${this.bot.token}/${file.file_path}`;
-
-                const transcribed = await this.core.transcribeAudio(fileUrl);
-                await ctx.reply(`Transcription: ${transcribed}`);
-
-                return this.processAndSend(ctx, transcribed, true);
-            } catch (error) {
-                const msg = error instanceof Error ? error.message : 'Unknown error';
-                return ctx.reply(`Error: ${msg}`);
-            }
+            return this.queueVoice(ctx);
         });
 
-        // Document uploads
-        this.bot.on('message:document', (ctx) => {
-            return this.processDocument(ctx);
+        // Document uploads - queue for processing
+        this.bot.on('message:document', async (ctx) => {
+            return this.queueDocument(ctx);
         });
 
         this.bot.catch((err) => console.error('Bot error:', err));
     }
 
-    private async processDocument(ctx: Context): Promise<void> {
+    private async queueTTS(ctx: Context, text: string, useAI: boolean): Promise<void> {
+        if (!ctx.chat) return;
+
+        // Send immediate acknowledgment
+        const statusMsg = await ctx.reply('Queued for processing...');
+
+        // Add to queue
+        await this.queue.add(`tts-${Date.now()}`, {
+            type: useAI ? 'ttsai' : 'tts',
+            chatId: ctx.chat.id,
+            text,
+            statusMsgId: statusMsg.message_id,
+        });
+    }
+
+    private async queueDocument(ctx: Context): Promise<void> {
         const doc = ctx.message?.document;
-        if (!doc) return;
+        if (!doc || !ctx.chat) return;
 
         const format = this.docs.detectFormat(doc.file_name || '', doc.mime_type);
 
@@ -147,104 +160,34 @@ export class WebhookBot {
             return;
         }
 
-        let statusMsg: { chat: { id: number }; message_id: number } | undefined;
+        // Send immediate acknowledgment
+        const statusMsg = await ctx.reply('Document queued for processing...');
 
-        try {
-            statusMsg = await ctx.reply('Downloading document...');
-
-            // Download file
-            const file = await ctx.getFile();
-            const fileUrl = `https://api.telegram.org/file/bot${this.bot.token}/${file.file_path}`;
-            const response = await fetch(fileUrl);
-            const buffer = Buffer.from(await response.arrayBuffer());
-
-            await ctx.api.editMessageText(
-                statusMsg.chat.id,
-                statusMsg.message_id,
-                'Parsing document...'
-            ).catch(() => {});
-
-            // Parse document
-            const parsed = await this.docs.parseBuffer(buffer, format, doc.file_name);
-
-            if (!parsed.text || parsed.text.length === 0) {
-                throw new Error('Could not extract text from document');
-            }
-
-            const charCount = parsed.text.length;
-            await ctx.api.editMessageText(
-                statusMsg.chat.id,
-                statusMsg.message_id,
-                `Extracted ${charCount} characters. Generating audio...`
-            ).catch(() => {});
-
-            // Progress callback
-            const onProgress = async (current: number, total: number, message: string) => {
-                if (statusMsg && total > 1) {
-                    await ctx.api.editMessageText(
-                        statusMsg.chat.id,
-                        statusMsg.message_id,
-                        message
-                    ).catch(() => {});
-                }
-            };
-
-            if (!ctx.chat) throw new Error('No chat context');
-            const { audio } = await this.core.generateSpeech(ctx.chat.id, parsed.text, false, onProgress);
-
-            // Delete status message
-            if (statusMsg) {
-                await ctx.api.deleteMessage(statusMsg.chat.id, statusMsg.message_id).catch(() => {});
-            }
-
-            // Send audio
-            await ctx.replyWithVoice(
-                new InputFile(new Uint8Array(audio), 'speech.opus'),
-                { caption: parsed.title ? `📄 ${parsed.title}` : undefined }
-            );
-        } catch (error) {
-            if (statusMsg) {
-                await ctx.api.deleteMessage(statusMsg.chat.id, statusMsg.message_id).catch(() => {});
-            }
-            const msg = error instanceof Error ? error.message : 'Unknown error';
-            await ctx.reply(`Error processing document: ${msg}`);
-        }
+        // Add to queue
+        await this.queue.add(`doc-${Date.now()}`, {
+            type: 'document',
+            chatId: ctx.chat.id,
+            fileId: doc.file_id,
+            fileName: doc.file_name,
+            mimeType: doc.mime_type,
+            statusMsgId: statusMsg.message_id,
+        });
     }
 
-    private async processAndSend(ctx: Context, text: string, useAI: boolean) {
-        let statusMsg: { chat: { id: number }; message_id: number } | undefined;
+    private async queueVoice(ctx: Context): Promise<void> {
+        const voice = ctx.message?.voice;
+        if (!voice || !ctx.chat) return;
 
-        try {
-            statusMsg = await ctx.reply('Processing...');
+        // Send immediate acknowledgment
+        const statusMsg = await ctx.reply('Voice message queued for transcription...');
 
-            // Progress callback updates the status message
-            const onProgress = async (current: number, total: number, message: string) => {
-                if (statusMsg && total > 1) {
-                    await ctx.api.editMessageText(
-                        statusMsg.chat.id,
-                        statusMsg.message_id,
-                        message
-                    ).catch(() => {}); // Ignore edit failures
-                }
-            };
-
-            if (!ctx.chat) throw new Error('No chat context');
-            const { audio } = await this.core.generateSpeech(ctx.chat.id, text, useAI, onProgress);
-
-            // Delete status message before sending voice
-            if (statusMsg) {
-                await ctx.api.deleteMessage(statusMsg.chat.id, statusMsg.message_id).catch(() => {});
-            }
-
-            return ctx.replyWithVoice(new InputFile(new Uint8Array(audio), 'speech.opus'));
-        } catch (error) {
-            // Delete status message on error
-            if (statusMsg) {
-                await ctx.api.deleteMessage(statusMsg.chat.id, statusMsg.message_id).catch(() => {});
-            }
-            const msg = error instanceof Error ? error.message : 'Unknown error';
-            return ctx.reply(`Error: ${msg}`);
-        }
+        // Add to queue
+        await this.queue.add(`voice-${Date.now()}`, {
+            type: 'voice',
+            chatId: ctx.chat.id,
+            fileId: voice.file_id,
+            statusMsgId: statusMsg.message_id,
+        });
     }
 
     async setWebhook() {
@@ -261,6 +204,11 @@ export class WebhookBot {
 
         const processedUpdates = new Set<number>();
 
+        // Health check endpoint
+        app.get('/health', (req, res) => {
+            res.json({ status: 'ok', queue: 'connected' });
+        });
+
         app.post('*', async (req, res) => {
             const updateId = req.body.update_id;
             if (processedUpdates.has(updateId)) {
@@ -269,7 +217,8 @@ export class WebhookBot {
             }
 
             try {
-                await webhookCallback(this.bot, 'express', { timeoutMilliseconds: 120000 })(req, res);
+                // Respond quickly to Telegram
+                await webhookCallback(this.bot, 'express', { timeoutMilliseconds: 30000 })(req, res);
                 processedUpdates.add(updateId);
 
                 // Cleanup old entries
@@ -287,5 +236,12 @@ export class WebhookBot {
             console.log(`Listening on port ${this.port}`);
             console.log(`Webhook URL: ${this.webhookUrl}`);
         });
+    }
+
+    async shutdown(): Promise<void> {
+        console.log('Shutting down...');
+        await this.worker?.close();
+        await this.queue?.close();
+        this.server?.close();
     }
 }
