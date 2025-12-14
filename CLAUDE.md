@@ -2,51 +2,74 @@
 
 ## What This Is
 
-Telegram bot converting text → speech via OpenAI TTS API. Simple utility, used as a test case for the foundation agentic architecture.
+Telegram bot converting text/documents to speech via OpenAI TTS API. Production deployment at tts.bkk.lol.
 
-## Session 035 Cleanup (Dec 2024)
+## Current Architecture (Dec 2024)
 
-- Removed dead ElevenLabs code (was imported but never wired up)
-- Fixed constructor signatures to not require unused API keys
-- Made domain configurable via env (was hardcoded to tts.bkk.lol)
-- Fixed Buffer → Uint8Array type issues for Bun compatibility
-- Generated proper .env.example
-
-## Architecture Decision
-
-Two parallel implementations exist:
-- **Polling mode** (`index.ts` → `bot.ts`): Uses node-telegram-bot-api + BullMQ queue
-- **Webhook mode** (`webhookIndex.ts` → `webhookBot.ts`): Uses grammy, no queue
-
-This is intentional - polling for dev simplicity, webhook for production.
-
-## Known Issues / Future Work
-
-- Two different Telegram bot libraries (could consolidate to grammy)
-- No voice selection (hardcoded to 'alloy')
-- No rate limiting / user quotas
-- No tests
-
-## Running Locally
-
-```bash
-# Needs Redis for polling mode
-docker run -d -p 6379:6379 redis
-
-# Copy env and add your keys
-cp .env.example .env
-
-# Run
-bun run src/index.ts
+**Webhook mode with BullMQ queue:**
+```
+Telegram → nginx (HTTPS) → Express (:3000) → Queue job → Worker → OpenAI
+                                   ↓
+                          Instant ack to Telegram
 ```
 
-## For Webhook Testing
+**Key files:**
+- `src/webhookIndex.ts` - Entry point
+- `src/webhookBot.ts` - Grammy bot + Express, queues jobs
+- `src/queue.ts` - BullMQ job types + worker processing
+- `src/core.ts` - TTS business logic
+- `src/openaiService.ts` - OpenAI API calls
+
+**Why queue?**
+- Telegram webhooks timeout at 60s
+- Document processing takes minutes
+- Queue gives: retries, rate limiting, concurrent workers (3)
+
+## Production Setup
+
+- **Server:** Ubuntu 24.04 at 89.125.209.100
+- **Domain:** tts.bkk.lol (HTTPS via certbot)
+- **User:** `tts` (dedicated, runs service)
+- **App:** `/srv/tts`
+- **Service:** systemd `tts.service`
+
+**Useful commands:**
+```bash
+systemctl status tts      # check status
+journalctl -u tts -f      # follow logs
+systemctl restart tts     # restart
+curl https://tts.bkk.lol/health  # health check
+```
+
+## Stack
+
+- Runtime: Bun (`/usr/local/bin/bun`)
+- Bot framework: grammy
+- Queue: BullMQ + Redis
+- Reverse proxy: nginx
+- Process manager: systemd
+
+## Known Limitations
+
+- User preferences stored in-memory (lost on restart)
+- No rate limiting per user
+- No admin commands
+
+## Development
 
 ```bash
-# Terminal 1
+# Local dev
+docker run -d -p 6379:6379 redis
 bun run src/webhookIndex.ts
-
-# Terminal 2
 cloudflared tunnel --url http://localhost:3000
-# Take the URL, update DOMAIN in .env
+```
+
+## Deployment
+
+```bash
+# On server
+cd /srv/tts
+git pull
+bun install
+systemctl restart tts
 ```
