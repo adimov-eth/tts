@@ -4,9 +4,6 @@ import { TTSCore } from './core';
 import { DocumentService } from './documentService';
 import { Bot, InputFile } from 'grammy';
 
-// Job types
-export type JobType = 'tts' | 'ttsai' | 'document' | 'voice';
-
 export interface TTSJobData {
     type: 'tts' | 'ttsai';
     chatId: number;
@@ -34,32 +31,26 @@ export type JobData = TTSJobData | DocumentJobData | VoiceJobData;
 
 const QUEUE_NAME = 'tts-jobs';
 
-// Redis connection config
 const redisConfig = {
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT || '6379'),
     maxRetriesPerRequest: null,
 };
 
-// Create queue
 export function createQueue(): Queue<JobData> {
-    const connection = new Redis(redisConfig);
-    return new Queue<JobData>(QUEUE_NAME, { connection });
+    return new Queue<JobData>(QUEUE_NAME, { connection: new Redis(redisConfig) });
 }
 
-// Create worker
 export function createWorker(
     bot: Bot,
     core: TTSCore,
-    docs: DocumentService
+    docs: DocumentService,
+    queue: Queue<JobData>
 ): Worker<JobData> {
-    const connection = new Redis(redisConfig);
-
     const worker = new Worker<JobData>(
         QUEUE_NAME,
         async (job: Job<JobData>) => {
             const { data } = job;
-
             try {
                 switch (data.type) {
                     case 'tts':
@@ -70,59 +61,43 @@ export function createWorker(
                         await processDocument(bot, core, docs, data);
                         break;
                     case 'voice':
-                        await processVoice(bot, core, data);
+                        await processVoice(bot, core, queue, data);
                         break;
                 }
             } catch (error) {
+                await deleteStatus(bot, data.chatId, data.statusMsgId);
                 const msg = error instanceof Error ? error.message : 'Unknown error';
                 await bot.api.sendMessage(data.chatId, `Error: ${msg}`).catch(() => {});
-                throw error; // Re-throw for BullMQ retry logic
+                throw error;
             }
         },
-        {
-            connection,
-            concurrency: 3, // Process up to 3 jobs concurrently
-        }
+        { connection: new Redis(redisConfig), concurrency: 3 }
     );
 
-    worker.on('failed', (job, err) => {
-        console.error(`Job ${job?.id} failed:`, err.message);
-    });
-
-    worker.on('completed', (job) => {
-        console.log(`Job ${job.id} completed`);
-    });
+    worker.on('failed', (job, err) => console.error(`Job ${job?.id} failed:`, err.message));
+    worker.on('completed', (job) => console.log(`Job ${job.id} completed`));
 
     return worker;
 }
 
+async function deleteStatus(bot: Bot, chatId: number, msgId?: number): Promise<void> {
+    if (msgId) await bot.api.deleteMessage(chatId, msgId).catch(() => {});
+}
+
+async function updateStatus(bot: Bot, chatId: number, msgId: number | undefined, text: string): Promise<void> {
+    if (msgId) await bot.api.editMessageText(chatId, msgId, text).catch(() => {});
+}
+
 async function processTTS(bot: Bot, core: TTSCore, data: TTSJobData): Promise<void> {
     const { chatId, text, statusMsgId } = data;
-    const useAI = data.type === 'ttsai';
 
-    try {
-        // Progress callback
-        const onProgress = async (current: number, total: number, message: string) => {
-            if (statusMsgId && total > 1) {
-                await bot.api.editMessageText(chatId, statusMsgId, message).catch(() => {});
-            }
-        };
+    const onProgress = async (_: number, total: number, message: string) => {
+        if (total > 1) await updateStatus(bot, chatId, statusMsgId, message);
+    };
 
-        const { audio } = await core.generateSpeech(chatId, text, useAI, onProgress);
-
-        // Delete status message
-        if (statusMsgId) {
-            await bot.api.deleteMessage(chatId, statusMsgId).catch(() => {});
-        }
-
-        // Send audio
-        await bot.api.sendVoice(chatId, new InputFile(new Uint8Array(audio), 'speech.opus'));
-    } catch (error) {
-        if (statusMsgId) {
-            await bot.api.deleteMessage(chatId, statusMsgId).catch(() => {});
-        }
-        throw error;
-    }
+    const { audio } = await core.generateSpeech(chatId, text, data.type === 'ttsai', onProgress);
+    await deleteStatus(bot, chatId, statusMsgId);
+    await bot.api.sendVoice(chatId, new InputFile(new Uint8Array(audio), 'speech.opus'));
 }
 
 async function processDocument(
@@ -133,106 +108,56 @@ async function processDocument(
 ): Promise<void> {
     const { chatId, fileId, fileName, statusMsgId } = data;
 
-    try {
-        // Update status
-        if (statusMsgId) {
-            await bot.api.editMessageText(chatId, statusMsgId, 'Downloading document...').catch(() => {});
-        }
+    await updateStatus(bot, chatId, statusMsgId, 'Downloading document...');
 
-        // Download file
-        const file = await bot.api.getFile(fileId);
-        const fileUrl = `https://api.telegram.org/file/bot${bot.token}/${file.file_path}`;
-        const response = await fetch(fileUrl);
-        const buffer = Buffer.from(await response.arrayBuffer());
+    const file = await bot.api.getFile(fileId);
+    const response = await fetch(`https://api.telegram.org/file/bot${bot.token}/${file.file_path}`);
+    const buffer = Buffer.from(await response.arrayBuffer());
 
-        if (statusMsgId) {
-            await bot.api.editMessageText(chatId, statusMsgId, 'Parsing document...').catch(() => {});
-        }
+    await updateStatus(bot, chatId, statusMsgId, 'Parsing document...');
 
-        // Detect format and parse
-        const format = docs.detectFormat(fileName || '', data.mimeType);
-        if (!format) {
-            throw new Error('Unsupported document format');
-        }
+    const format = docs.detectFormat(fileName || '', data.mimeType);
+    if (!format) throw new Error('Unsupported document format');
 
-        const parsed = await docs.parseBuffer(buffer, format, fileName);
+    const parsed = await docs.parseBuffer(buffer, format, fileName);
+    if (!parsed.text?.length) throw new Error('Could not extract text from document');
 
-        if (!parsed.text || parsed.text.length === 0) {
-            throw new Error('Could not extract text from document');
-        }
+    await updateStatus(bot, chatId, statusMsgId, `Extracted ${parsed.text.length} characters. Generating audio...`);
 
-        const charCount = parsed.text.length;
-        if (statusMsgId) {
-            await bot.api.editMessageText(
-                chatId,
-                statusMsgId,
-                `Extracted ${charCount} characters. Generating audio...`
-            ).catch(() => {});
-        }
+    const onProgress = async (_: number, total: number, message: string) => {
+        if (total > 1) await updateStatus(bot, chatId, statusMsgId, message);
+    };
 
-        // Progress callback
-        const onProgress = async (current: number, total: number, message: string) => {
-            if (statusMsgId && total > 1) {
-                await bot.api.editMessageText(chatId, statusMsgId, message).catch(() => {});
-            }
-        };
-
-        const { audio } = await core.generateSpeech(chatId, parsed.text, false, onProgress);
-
-        // Delete status message
-        if (statusMsgId) {
-            await bot.api.deleteMessage(chatId, statusMsgId).catch(() => {});
-        }
-
-        // Send audio
-        await bot.api.sendVoice(
-            chatId,
-            new InputFile(new Uint8Array(audio), 'speech.opus'),
-            { caption: parsed.title ? `📄 ${parsed.title}` : undefined }
-        );
-    } catch (error) {
-        if (statusMsgId) {
-            await bot.api.deleteMessage(chatId, statusMsgId).catch(() => {});
-        }
-        throw error;
-    }
+    const { audio } = await core.generateSpeech(chatId, parsed.text, false, onProgress);
+    await deleteStatus(bot, chatId, statusMsgId);
+    await bot.api.sendVoice(
+        chatId,
+        new InputFile(new Uint8Array(audio), 'speech.opus'),
+        { caption: parsed.title ? `📄 ${parsed.title}` : undefined }
+    );
 }
 
-async function processVoice(bot: Bot, core: TTSCore, data: VoiceJobData): Promise<void> {
+async function processVoice(
+    bot: Bot,
+    core: TTSCore,
+    queue: Queue<JobData>,
+    data: VoiceJobData
+): Promise<void> {
     const { chatId, fileId, statusMsgId } = data;
 
-    try {
-        // Download voice file
-        const file = await bot.api.getFile(fileId);
-        const fileUrl = `https://api.telegram.org/file/bot${bot.token}/${file.file_path}`;
+    const file = await bot.api.getFile(fileId);
+    const transcribed = await core.transcribeAudio(
+        `https://api.telegram.org/file/bot${bot.token}/${file.file_path}`
+    );
 
-        // Transcribe
-        const transcribed = await core.transcribeAudio(fileUrl);
+    await deleteStatus(bot, chatId, statusMsgId);
+    await bot.api.sendMessage(chatId, `Transcription: ${transcribed}`);
 
-        // Delete status message
-        if (statusMsgId) {
-            await bot.api.deleteMessage(chatId, statusMsgId).catch(() => {});
-        }
-
-        // Send transcription
-        await bot.api.sendMessage(chatId, `Transcription: ${transcribed}`);
-
-        // Queue TTS job for the transcription
-        const queue = createQueue();
-        const statusMsg = await bot.api.sendMessage(chatId, 'Converting to speech...');
-
-        await queue.add('tts-from-voice', {
-            type: 'ttsai',
-            chatId,
-            text: transcribed,
-            statusMsgId: statusMsg.message_id,
-        });
-
-        await queue.close();
-    } catch (error) {
-        if (statusMsgId) {
-            await bot.api.deleteMessage(chatId, statusMsgId).catch(() => {});
-        }
-        throw error;
-    }
+    const statusMsg = await bot.api.sendMessage(chatId, 'Converting to speech...');
+    await queue.add(`tts-from-voice-${Date.now()}`, {
+        type: 'ttsai',
+        chatId,
+        text: transcribed,
+        statusMsgId: statusMsg.message_id,
+    });
 }

@@ -45,7 +45,7 @@ export class WebhookBot {
 
         // Initialize queue and worker
         this.queue = createQueue();
-        this.worker = createWorker(this.bot, this.core, this.docs);
+        this.worker = createWorker(this.bot, this.core, this.docs, this.queue);
 
         console.log('Bot initialized with queue');
         this.setupHandlers();
