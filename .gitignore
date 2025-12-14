@@ -50,3 +50,7 @@ yarn-error.log*
 
 # Yarn Integrity file
 .yarn-integrity
+
+# Temporary files
+test-redis.ts
+deploy.sh
