@@ -31,7 +31,7 @@ export class TTSCore {
         useAI: boolean = false,
         onProgress?: ProgressCallback
     ): Promise<TTSResult> {
-        const prefs = getPrefs(chatId);
+        const prefs = await getPrefs(chatId);
 
         let processedText = text;
         if (useAI) {
@@ -54,8 +54,8 @@ export class TTSCore {
     }
 
     // Command handlers - return message to send
-    handleStart(chatId: number): CommandResult {
-        const prefs = getPrefs(chatId);
+    async handleStart(chatId: number): Promise<CommandResult> {
+        const prefs = await getPrefs(chatId);
         return {
             message:
                 'Welcome to the TTS Bot!\n\n' +
@@ -94,8 +94,8 @@ export class TTSCore {
         };
     }
 
-    handleVoices(chatId: number): CommandResult {
-        const prefs = getPrefs(chatId);
+    async handleVoices(chatId: number): Promise<CommandResult> {
+        const prefs = await getPrefs(chatId);
         const voiceList = AVAILABLE_VOICES.map(v =>
             v === prefs.voice ? `* ${v} (current)` : `  ${v}`
         ).join('\n');
@@ -104,9 +104,9 @@ export class TTSCore {
         };
     }
 
-    handleVoice(chatId: number, voice?: string): CommandResult {
+    async handleVoice(chatId: number, voice?: string): Promise<CommandResult> {
         if (!voice) {
-            const prefs = getPrefs(chatId);
+            const prefs = await getPrefs(chatId);
             return { message: `Current voice: ${prefs.voice}\nUse /voice <name> to change` };
         }
 
@@ -115,13 +115,13 @@ export class TTSCore {
             return { message: `Unknown voice: ${voice}\nUse /voices to see available options` };
         }
 
-        setVoice(chatId, v);
+        await setVoice(chatId, v);
         return { message: `Voice set to: ${v}` };
     }
 
-    handleSpeed(chatId: number, speedStr?: string): CommandResult {
+    async handleSpeed(chatId: number, speedStr?: string): Promise<CommandResult> {
         if (!speedStr) {
-            const prefs = getPrefs(chatId);
+            const prefs = await getPrefs(chatId);
             return { message: `Current speed: ${prefs.speed}x\nUse /speed <0.25-4.0> to change` };
         }
 
@@ -130,13 +130,13 @@ export class TTSCore {
             return { message: 'Speed must be between 0.25 and 4.0' };
         }
 
-        setSpeed(chatId, speed);
+        await setSpeed(chatId, speed);
         return { message: `Speed set to: ${speed}x` };
     }
 
-    handleTone(chatId: number, instruction?: string): CommandResult {
+    async handleTone(chatId: number, instruction?: string): Promise<CommandResult> {
         if (!instruction) {
-            const prefs = getPrefs(chatId);
+            const prefs = await getPrefs(chatId);
             const current = prefs.instructions || 'none';
             return {
                 message:
@@ -147,16 +147,16 @@ export class TTSCore {
         }
 
         if (instruction.toLowerCase() === 'off') {
-            setInstructions(chatId, undefined);
+            await setInstructions(chatId, undefined);
             return { message: 'Tone instruction cleared' };
         }
 
-        setInstructions(chatId, instruction);
+        await setInstructions(chatId, instruction);
         return { message: `Tone set to: ${instruction}` };
     }
 
-    handleSettings(chatId: number): CommandResult {
-        const prefs = getPrefs(chatId);
+    async handleSettings(chatId: number): Promise<CommandResult> {
+        const prefs = await getPrefs(chatId);
         return {
             message:
                 'Your settings:\n\n' +

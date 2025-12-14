@@ -5,6 +5,9 @@ import { DocumentService } from './documentService';
 import { createQueue, createWorker, JobData } from './queue';
 import { Queue, Worker } from 'bullmq';
 import http from 'http';
+import { authMiddleware, adminOnly } from './middleware/auth';
+import { rateLimitMiddleware } from './middleware/ratelimit';
+import { createInvite, listInvites, revokeInvite, isAdmin, isAuthorized, getInvite, redeemInvite, createUser } from './redis';
 
 export class WebhookBot {
     private bot: Bot;
@@ -32,7 +35,7 @@ export class WebhookBot {
     private async init() {
         await this.bot.init();
         await this.bot.api.setMyCommands([
-            { command: 'start', description: 'Start the bot' },
+            { command: 'start', description: 'Start the bot (use with invite code)' },
             { command: 'help', description: 'Show help' },
             { command: 'tts', description: 'Convert text to speech' },
             { command: 'ttsai', description: 'Convert with AI enhancement' },
@@ -41,6 +44,10 @@ export class WebhookBot {
             { command: 'speed', description: 'Set speed (0.25-4.0)' },
             { command: 'tone', description: 'Set tone instruction' },
             { command: 'settings', description: 'Show current settings' },
+            { command: 'invite', description: '(Admin) Create user invite' },
+            { command: 'admincode', description: '(Admin) Create admin invite' },
+            { command: 'codes', description: '(Admin) List your invite codes' },
+            { command: 'revoke', description: '(Admin) Revoke an invite code' },
         ]);
 
         // Initialize queue and worker
@@ -53,60 +60,121 @@ export class WebhookBot {
     }
 
     private setupHandlers() {
-        // Commands that don't need queueing (instant responses)
-        this.bot.command('start', (ctx) => {
-            const result = this.core.handleStart(ctx.chat.id);
-            return ctx.reply(result.message);
+        // /start command handles auth specially (invite code redemption)
+        this.bot.command('start', async (ctx) => {
+            const chatId = ctx.chat.id;
+            const code = ctx.match?.toString().trim();
+
+            // Already authorized - show welcome
+            if (await isAuthorized(chatId)) {
+                const result = await this.core.handleStart(chatId);
+                return ctx.reply(result.message);
+            }
+
+            // Try to redeem invite code
+            if (code) {
+                const invite = await getInvite(code);
+                if (invite && await redeemInvite(code, chatId)) {
+                    await ctx.reply(`Welcome! You've been registered as ${invite.role}.`);
+                    const result = await this.core.handleStart(chatId);
+                    return ctx.reply(result.message);
+                }
+            }
+
+            // Not authorized and no valid code
+            return ctx.reply('You need an invite code to use this bot. Send /start <code>');
         });
 
-        this.bot.command('help', (ctx) => {
+        // Apply auth middleware to all other handlers
+        this.bot.use(authMiddleware());
+
+        this.bot.command('help', async (ctx) => {
             const result = this.core.handleHelp();
             return ctx.reply(result.message);
         });
 
-        this.bot.command('voices', (ctx) => {
-            const result = this.core.handleVoices(ctx.chat.id);
+        this.bot.command('voices', async (ctx) => {
+            const result = await this.core.handleVoices(ctx.chat.id);
             return ctx.reply(result.message);
         });
 
-        this.bot.command('voice', (ctx) => {
+        this.bot.command('voice', async (ctx) => {
             const arg = ctx.match?.toString().trim();
-            const result = this.core.handleVoice(ctx.chat.id, arg || undefined);
+            const result = await this.core.handleVoice(ctx.chat.id, arg || undefined);
             return ctx.reply(result.message);
         });
 
-        this.bot.command('speed', (ctx) => {
+        this.bot.command('speed', async (ctx) => {
             const arg = ctx.match?.toString().trim();
-            const result = this.core.handleSpeed(ctx.chat.id, arg || undefined);
+            const result = await this.core.handleSpeed(ctx.chat.id, arg || undefined);
             return ctx.reply(result.message);
         });
 
-        this.bot.command('tone', (ctx) => {
+        this.bot.command('tone', async (ctx) => {
             const arg = ctx.match?.toString().trim();
-            const result = this.core.handleTone(ctx.chat.id, arg || undefined);
+            const result = await this.core.handleTone(ctx.chat.id, arg || undefined);
             return ctx.reply(result.message);
         });
 
-        this.bot.command('settings', (ctx) => {
-            const result = this.core.handleSettings(ctx.chat.id);
+        this.bot.command('settings', async (ctx) => {
+            const result = await this.core.handleSettings(ctx.chat.id);
             return ctx.reply(result.message);
         });
 
-        // TTS commands - queue for async processing
-        this.bot.command('tts', async (ctx) => {
+        // Admin commands
+        this.bot.command('invite', async (ctx) => {
+            if (!await isAdmin(ctx.chat.id)) {
+                return ctx.reply('This command is for admins only.');
+            }
+            const code = await createInvite(ctx.chat.id, 'user');
+            return ctx.reply(`User invite code: ${code}\nShare this to invite someone.`);
+        });
+
+        this.bot.command('admincode', async (ctx) => {
+            if (!await isAdmin(ctx.chat.id)) {
+                return ctx.reply('This command is for admins only.');
+            }
+            const code = await createInvite(ctx.chat.id, 'admin');
+            return ctx.reply(`Admin invite code: ${code}\nShare carefully - this grants admin access.`);
+        });
+
+        this.bot.command('codes', async (ctx) => {
+            if (!await isAdmin(ctx.chat.id)) {
+                return ctx.reply('This command is for admins only.');
+            }
+            const invites = await listInvites(ctx.chat.id);
+            if (invites.length === 0) {
+                return ctx.reply('No active invite codes.');
+            }
+            const lines = invites.map(i => `${i.code} (${i.role}, ${i.usesLeft} uses left)`);
+            return ctx.reply(`Your invite codes:\n${lines.join('\n')}`);
+        });
+
+        this.bot.command('revoke', async (ctx) => {
+            if (!await isAdmin(ctx.chat.id)) {
+                return ctx.reply('This command is for admins only.');
+            }
+            const code = ctx.match?.toString().trim();
+            if (!code) return ctx.reply('Usage: /revoke <code>');
+            const success = await revokeInvite(code, ctx.chat.id);
+            return ctx.reply(success ? `Revoked: ${code}` : 'Code not found or not yours.');
+        });
+
+        // TTS commands - queue for async processing (with rate limiting)
+        this.bot.command('tts', rateLimitMiddleware(), async (ctx) => {
             const text = ctx.match?.toString().trim();
             if (!text) return ctx.reply('Usage: /tts <text>');
             return this.queueTTS(ctx, text, false);
         });
 
-        this.bot.command('ttsai', async (ctx) => {
+        this.bot.command('ttsai', rateLimitMiddleware(), async (ctx) => {
             const text = ctx.match?.toString().trim();
             if (!text) return ctx.reply('Usage: /ttsai <text>');
             return this.queueTTS(ctx, text, true);
         });
 
-        // Text messages (not commands) - queue for processing
-        this.bot.on('message:text', async (ctx) => {
+        // Text messages (not commands) - queue for processing (with rate limiting)
+        this.bot.on('message:text', rateLimitMiddleware(), async (ctx) => {
             const text = ctx.message.text;
             if (text.startsWith('/')) {
                 return ctx.reply('Unknown command. Use /help for available commands.');
@@ -115,13 +183,13 @@ export class WebhookBot {
             return this.queueTTS(ctx, text, false);
         });
 
-        // Voice messages - queue for processing
-        this.bot.on('message:voice', async (ctx) => {
+        // Voice messages - queue for processing (with rate limiting)
+        this.bot.on('message:voice', rateLimitMiddleware(), async (ctx) => {
             return this.queueVoice(ctx);
         });
 
-        // Document uploads - queue for processing
-        this.bot.on('message:document', async (ctx) => {
+        // Document uploads - queue for processing (with rate limiting)
+        this.bot.on('message:document', rateLimitMiddleware(), async (ctx) => {
             return this.queueDocument(ctx);
         });
 

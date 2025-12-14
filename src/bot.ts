@@ -30,39 +30,39 @@ export class TTSBot {
     }
 
     private setupHandlers(): void {
-        this.bot.onText(/\/start/, (msg) => {
-            const result = this.core.handleStart(msg.chat.id);
+        this.bot.onText(/\/start/, async (msg) => {
+            const result = await this.core.handleStart(msg.chat.id);
             this.bot.sendMessage(msg.chat.id, result.message);
         });
 
-        this.bot.onText(/\/help/, (msg) => {
+        this.bot.onText(/\/help/, async (msg) => {
             const result = this.core.handleHelp();
             this.bot.sendMessage(msg.chat.id, result.message);
         });
 
-        this.bot.onText(/\/voices/, (msg) => {
-            const result = this.core.handleVoices(msg.chat.id);
+        this.bot.onText(/\/voices/, async (msg) => {
+            const result = await this.core.handleVoices(msg.chat.id);
             this.bot.sendMessage(msg.chat.id, result.message);
         });
 
         // Word boundary prevents matching /voices
-        this.bot.onText(/\/voice\b(?:\s+(.+))?/, (msg, match) => {
-            const result = this.core.handleVoice(msg.chat.id, match?.[1]?.trim());
+        this.bot.onText(/\/voice\b(?:\s+(.+))?/, async (msg, match) => {
+            const result = await this.core.handleVoice(msg.chat.id, match?.[1]?.trim());
             this.bot.sendMessage(msg.chat.id, result.message);
         });
 
-        this.bot.onText(/\/speed(?:\s+(.+))?/, (msg, match) => {
-            const result = this.core.handleSpeed(msg.chat.id, match?.[1]?.trim());
+        this.bot.onText(/\/speed(?:\s+(.+))?/, async (msg, match) => {
+            const result = await this.core.handleSpeed(msg.chat.id, match?.[1]?.trim());
             this.bot.sendMessage(msg.chat.id, result.message);
         });
 
-        this.bot.onText(/\/tone(?:\s+(.+))?/, (msg, match) => {
-            const result = this.core.handleTone(msg.chat.id, match?.[1]?.trim());
+        this.bot.onText(/\/tone(?:\s+(.+))?/, async (msg, match) => {
+            const result = await this.core.handleTone(msg.chat.id, match?.[1]?.trim());
             this.bot.sendMessage(msg.chat.id, result.message);
         });
 
-        this.bot.onText(/\/settings/, (msg) => {
-            const result = this.core.handleSettings(msg.chat.id);
+        this.bot.onText(/\/settings/, async (msg) => {
+            const result = await this.core.handleSettings(msg.chat.id);
             this.bot.sendMessage(msg.chat.id, result.message);
         });
 

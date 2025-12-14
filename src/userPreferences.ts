@@ -1,3 +1,5 @@
+import * as redisPrefs from './redis/preferences';
+
 export const AVAILABLE_VOICES = [
     'alloy', 'ash', 'ballad', 'coral', 'echo',
     'fable', 'nova', 'onyx', 'sage', 'shimmer', 'verse'
@@ -11,35 +13,21 @@ export interface UserPrefs {
     instructions?: string;
 }
 
-const DEFAULT_PREFS: UserPrefs = {
-    voice: 'alloy',
-    speed: 1.0,
-};
-
-// Simple in-memory storage - could be Redis later
-const userPrefs = new Map<number, UserPrefs>();
-
-export function getPrefs(chatId: number): UserPrefs {
-    return userPrefs.get(chatId) || { ...DEFAULT_PREFS };
+export async function getPrefs(chatId: number): Promise<UserPrefs> {
+    return redisPrefs.getPrefs(chatId) as Promise<UserPrefs>;
 }
 
-export function setVoice(chatId: number, voice: Voice): void {
-    const prefs = getPrefs(chatId);
-    prefs.voice = voice;
-    userPrefs.set(chatId, prefs);
+export async function setVoice(chatId: number, voice: Voice): Promise<void> {
+    await redisPrefs.setVoice(chatId, voice);
 }
 
-export function setSpeed(chatId: number, speed: number): void {
+export async function setSpeed(chatId: number, speed: number): Promise<void> {
     const clamped = Math.max(0.25, Math.min(4.0, speed));
-    const prefs = getPrefs(chatId);
-    prefs.speed = clamped;
-    userPrefs.set(chatId, prefs);
+    await redisPrefs.setSpeed(chatId, clamped);
 }
 
-export function setInstructions(chatId: number, instructions: string | undefined): void {
-    const prefs = getPrefs(chatId);
-    prefs.instructions = instructions;
-    userPrefs.set(chatId, prefs);
+export async function setInstructions(chatId: number, instructions: string | undefined): Promise<void> {
+    await redisPrefs.setInstructions(chatId, instructions);
 }
 
 export function isValidVoice(voice: string): voice is Voice {
