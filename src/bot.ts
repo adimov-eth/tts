@@ -157,8 +157,8 @@ export class TTSBot {
             const code = await createInvite(msg.chat.id, 'user');
             return this.bot.sendMessage(
                 msg.chat.id,
-                `User invite code: \`${code}\`\n\nShare link: ${this.inviteLink(code)}`,
-                { parse_mode: 'Markdown' }
+                `User invite code: <code>${code}</code>\n\nShare link: ${this.inviteLink(code)}`,
+                { parse_mode: 'HTML' }
             );
         });
 
@@ -170,8 +170,8 @@ export class TTSBot {
             const code = await createInvite(msg.chat.id, 'admin');
             return this.bot.sendMessage(
                 msg.chat.id,
-                `Admin invite code: \`${code}\`\n\nShare link: ${this.inviteLink(code)}\n\n⚠️ This grants admin access!`,
-                { parse_mode: 'Markdown' }
+                `Admin invite code: <code>${code}</code>\n\nShare link: ${this.inviteLink(code)}\n\n⚠️ This grants admin access!`,
+                { parse_mode: 'HTML' }
             );
         });
 
@@ -184,8 +184,8 @@ export class TTSBot {
             if (invites.length === 0) {
                 return this.bot.sendMessage(msg.chat.id, 'No active invite codes.');
             }
-            const lines = invites.map(i => `\`${i.code}\` (${i.role}, ${i.usesLeft} uses left)`);
-            return this.bot.sendMessage(msg.chat.id, `Your invite codes:\n${lines.join('\n')}`, { parse_mode: 'Markdown' });
+            const lines = invites.map(i => `<code>${i.code}</code> (${i.role}, ${i.usesLeft} uses left)`);
+            return this.bot.sendMessage(msg.chat.id, `Your invite codes:\n${lines.join('\n')}`, { parse_mode: 'HTML' });
         });
 
         this.bot.onText(/\/revoke(?:\s+(.+))?/, async (msg, match) => {

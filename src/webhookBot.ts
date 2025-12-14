@@ -158,8 +158,8 @@ export class WebhookBot {
             }
             const code = await createInvite(ctx.chat.id, 'user');
             return ctx.reply(
-                `User invite code: \`${code}\`\n\nShare link: ${this.inviteLink(code)}`,
-                { parse_mode: 'Markdown' }
+                `User invite code: <code>${code}</code>\n\nShare link: ${this.inviteLink(code)}`,
+                { parse_mode: 'HTML' }
             );
         });
 
@@ -169,8 +169,8 @@ export class WebhookBot {
             }
             const code = await createInvite(ctx.chat.id, 'admin');
             return ctx.reply(
-                `Admin invite code: \`${code}\`\n\nShare link: ${this.inviteLink(code)}\n\n⚠️ This grants admin access!`,
-                { parse_mode: 'Markdown' }
+                `Admin invite code: <code>${code}</code>\n\nShare link: ${this.inviteLink(code)}\n\n⚠️ This grants admin access!`,
+                { parse_mode: 'HTML' }
             );
         });
 
@@ -182,8 +182,8 @@ export class WebhookBot {
             if (invites.length === 0) {
                 return ctx.reply('No active invite codes.');
             }
-            const lines = invites.map(i => `\`${i.code}\` (${i.role}, ${i.usesLeft} uses left)`);
-            return ctx.reply(`Your invite codes:\n${lines.join('\n')}`, { parse_mode: 'Markdown' });
+            const lines = invites.map(i => `<code>${i.code}</code> (${i.role}, ${i.usesLeft} uses left)`);
+            return ctx.reply(`Your invite codes:\n${lines.join('\n')}`, { parse_mode: 'HTML' });
         });
 
         this.bot.command('revoke', async (ctx) => {
