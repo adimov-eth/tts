@@ -23,13 +23,24 @@ export class TTSBot {
     private bot: TelegramBot;
     private core: TTSCore;
     private docs: DocumentService;
+    private botUsername: string = '';
 
     constructor(telegramToken: string, openAIApiKey: string) {
         this.bot = new TelegramBot(telegramToken, { polling: true });
         this.core = new TTSCore(openAIApiKey);
         this.docs = new DocumentService();
-        this.setupCommands();
+        this.init();
+    }
+
+    private async init() {
+        const me = await this.bot.getMe();
+        this.botUsername = me.username || '';
+        await this.setupCommands();
         this.setupHandlers();
+    }
+
+    private inviteLink(code: string): string {
+        return `https://t.me/${this.botUsername}?start=${code}`;
     }
 
     private async setupCommands(): Promise<void> {
@@ -144,7 +155,11 @@ export class TTSBot {
                 return this.bot.sendMessage(msg.chat.id, 'This command is for admins only.');
             }
             const code = await createInvite(msg.chat.id, 'user');
-            return this.bot.sendMessage(msg.chat.id, `User invite code: ${code}\nShare this to invite someone.`);
+            return this.bot.sendMessage(
+                msg.chat.id,
+                `User invite code: \`${code}\`\n\nShare link: ${this.inviteLink(code)}`,
+                { parse_mode: 'Markdown' }
+            );
         });
 
         this.bot.onText(/\/admincode/, async (msg) => {
@@ -153,7 +168,11 @@ export class TTSBot {
                 return this.bot.sendMessage(msg.chat.id, 'This command is for admins only.');
             }
             const code = await createInvite(msg.chat.id, 'admin');
-            return this.bot.sendMessage(msg.chat.id, `Admin invite code: ${code}\nShare carefully - this grants admin access.`);
+            return this.bot.sendMessage(
+                msg.chat.id,
+                `Admin invite code: \`${code}\`\n\nShare link: ${this.inviteLink(code)}\n\n⚠️ This grants admin access!`,
+                { parse_mode: 'Markdown' }
+            );
         });
 
         this.bot.onText(/\/codes/, async (msg) => {
@@ -165,8 +184,8 @@ export class TTSBot {
             if (invites.length === 0) {
                 return this.bot.sendMessage(msg.chat.id, 'No active invite codes.');
             }
-            const lines = invites.map(i => `${i.code} (${i.role}, ${i.usesLeft} uses left)`);
-            return this.bot.sendMessage(msg.chat.id, `Your invite codes:\n${lines.join('\n')}`);
+            const lines = invites.map(i => `\`${i.code}\` (${i.role}, ${i.usesLeft} uses left)`);
+            return this.bot.sendMessage(msg.chat.id, `Your invite codes:\n${lines.join('\n')}`, { parse_mode: 'Markdown' });
         });
 
         this.bot.onText(/\/revoke(?:\s+(.+))?/, async (msg, match) => {
@@ -210,9 +229,26 @@ export class TTSBot {
                 return;
             }
             if (msg.text && !msg.text.startsWith('/') && msg.text.trim()) {
-                if (!await this.checkAuth(msg.chat.id)) return;
-                if (!await this.checkRateLimitAndIncrement(msg.chat.id, msg.text)) return;
-                this.processAndSend(msg.chat.id, msg.text, false);
+                const chatId = msg.chat.id;
+                const text = msg.text.trim();
+
+                // Handle plain text invite codes from unauthorized users
+                if (!await isAuthorized(chatId)) {
+                    if (/^[a-f0-9]{8}$/i.test(text)) {
+                        const invite = await getInvite(text);
+                        if (invite && await redeemInvite(text, chatId)) {
+                            await createUser(chatId, invite.role, invite.createdBy);
+                            await this.bot.sendMessage(chatId, `Welcome! You've been registered as ${invite.role}.`);
+                            const result = await this.core.handleStart(chatId);
+                            return this.bot.sendMessage(chatId, result.message);
+                        }
+                    }
+                    // Not an invite code, show auth message
+                    return this.bot.sendMessage(chatId, 'You need an invite code to use this bot. Send /start <code>');
+                }
+
+                if (!await this.checkRateLimitAndIncrement(chatId, text)) return;
+                this.processAndSend(chatId, text, false);
             }
         });
 

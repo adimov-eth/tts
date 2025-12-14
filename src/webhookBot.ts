@@ -18,6 +18,7 @@ export class WebhookBot {
     private server!: http.Server;
     private queue!: Queue<JobData>;
     private worker!: Worker<JobData>;
+    private botUsername!: string;
 
     constructor(token: string, openAIApiKey: string, port: number, domain: string, path: string) {
         this.bot = new Bot(token);
@@ -34,6 +35,7 @@ export class WebhookBot {
 
     private async init() {
         await this.bot.init();
+        this.botUsername = this.bot.botInfo.username;
         await this.bot.api.setMyCommands([
             { command: 'start', description: 'Start the bot (use with invite code)' },
             { command: 'help', description: 'Show help' },
@@ -57,6 +59,10 @@ export class WebhookBot {
         console.log('Bot initialized with queue');
         this.setupHandlers();
         this.setupServer();
+    }
+
+    private inviteLink(code: string): string {
+        return `https://t.me/${this.botUsername}?start=${code}`;
     }
 
     private setupHandlers() {
@@ -83,6 +89,30 @@ export class WebhookBot {
 
             // Not authorized and no valid code
             return ctx.reply('You need an invite code to use this bot. Send /start <code>');
+        });
+
+        // Handle plain text invite codes from unauthorized users (before auth middleware)
+        this.bot.on('message:text', async (ctx, next) => {
+            const chatId = ctx.chat.id;
+            const text = ctx.message.text.trim();
+
+            // Skip if authorized or if it's a command
+            if (text.startsWith('/') || await isAuthorized(chatId)) {
+                return next();
+            }
+
+            // Check if text looks like an invite code (8 hex chars)
+            if (/^[a-f0-9]{8}$/i.test(text)) {
+                const invite = await getInvite(text);
+                if (invite && await redeemInvite(text, chatId)) {
+                    await createUser(chatId, invite.role, invite.createdBy);
+                    await ctx.reply(`Welcome! You've been registered as ${invite.role}.`);
+                    const result = await this.core.handleStart(chatId);
+                    return ctx.reply(result.message);
+                }
+            }
+
+            return next();
         });
 
         // Apply auth middleware to all other handlers
@@ -127,7 +157,10 @@ export class WebhookBot {
                 return ctx.reply('This command is for admins only.');
             }
             const code = await createInvite(ctx.chat.id, 'user');
-            return ctx.reply(`User invite code: ${code}\nShare this to invite someone.`);
+            return ctx.reply(
+                `User invite code: \`${code}\`\n\nShare link: ${this.inviteLink(code)}`,
+                { parse_mode: 'Markdown' }
+            );
         });
 
         this.bot.command('admincode', async (ctx) => {
@@ -135,7 +168,10 @@ export class WebhookBot {
                 return ctx.reply('This command is for admins only.');
             }
             const code = await createInvite(ctx.chat.id, 'admin');
-            return ctx.reply(`Admin invite code: ${code}\nShare carefully - this grants admin access.`);
+            return ctx.reply(
+                `Admin invite code: \`${code}\`\n\nShare link: ${this.inviteLink(code)}\n\n⚠️ This grants admin access!`,
+                { parse_mode: 'Markdown' }
+            );
         });
 
         this.bot.command('codes', async (ctx) => {
@@ -146,8 +182,8 @@ export class WebhookBot {
             if (invites.length === 0) {
                 return ctx.reply('No active invite codes.');
             }
-            const lines = invites.map(i => `${i.code} (${i.role}, ${i.usesLeft} uses left)`);
-            return ctx.reply(`Your invite codes:\n${lines.join('\n')}`);
+            const lines = invites.map(i => `\`${i.code}\` (${i.role}, ${i.usesLeft} uses left)`);
+            return ctx.reply(`Your invite codes:\n${lines.join('\n')}`, { parse_mode: 'Markdown' });
         });
 
         this.bot.command('revoke', async (ctx) => {
