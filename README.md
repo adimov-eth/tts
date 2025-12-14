@@ -10,6 +10,9 @@ A Telegram bot that converts text and documents to speech using OpenAI's TTS API
 - **AI Enhancement** - Optional GPT-4 text preprocessing for better speech
 - **Customizable** - Voice selection, speed control, tone instructions
 - **Long Text Chunking** - Automatically handles texts > 4096 chars
+- **Invite System** - Admin/user roles with invite codes
+- **Rate Limiting** - 10 req/min hard limit, 20k chars/day soft limit
+- **Persistent Settings** - Preferences stored in Redis
 
 ## Architecture
 
@@ -56,7 +59,7 @@ See deployment checklist below.
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Welcome message |
+| `/start <code>` | Register with invite code |
 | `/help` | Show commands |
 | `/tts <text>` | Convert text to speech |
 | `/ttsai <text>` | Convert with AI enhancement |
@@ -65,6 +68,14 @@ See deployment checklist below.
 | `/speed <0.25-4.0>` | Set playback speed |
 | `/tone <instruction>` | Set tone (e.g., "speak cheerfully") |
 | `/settings` | Show current settings |
+
+**Admin commands:**
+| Command | Description |
+|---------|-------------|
+| `/invite` | Create user invite code |
+| `/admincode` | Create admin invite code |
+| `/codes` | List your active invite codes |
+| `/revoke <code>` | Revoke an invite code |
 
 **Also supports:**
 - Send any text message → auto-converts to speech
@@ -81,9 +92,22 @@ src/
 ├── core.ts            # TTS business logic
 ├── openaiService.ts   # OpenAI API (TTS + transcription)
 ├── documentService.ts # PDF/DOCX parsing
-├── userPreferences.ts # Per-user voice/speed/tone settings
-├── index.ts           # Legacy polling mode (not recommended)
-└── bot.ts             # Legacy polling bot
+├── userPreferences.ts # Per-user settings (wraps redis/preferences)
+├── index.ts           # Entry point (polling mode)
+├── bot.ts             # Polling bot (node-telegram-bot-api)
+├── redis/
+│   ├── client.ts      # Redis connection singleton
+│   ├── preferences.ts # User preferences storage
+│   ├── users.ts       # User management + auth
+│   ├── invites.ts     # Invite code system
+│   └── ratelimit.ts   # Rate limiting
+└── middleware/
+    ├── auth.ts        # Grammy auth middleware
+    └── ratelimit.ts   # Grammy rate limit middleware
+
+tests/
+├── unit/              # Unit tests (vitest)
+└── mocks/             # Redis, OpenAI, Telegram mocks
 ```
 
 ## Environment Variables
@@ -92,6 +116,9 @@ src/
 # Required
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 OPENAI_API_KEY=your_openai_api_key
+
+# Bootstrap admins (comma-separated Telegram chat IDs)
+ADMIN_CHAT_IDS=123456789,987654321
 
 # Redis
 REDIS_HOST=localhost
