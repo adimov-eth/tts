@@ -9,15 +9,16 @@ export interface ParsedDocument {
 export type SupportedFormat = 'pdf' | 'docx' | 'txt' | 'md';
 
 export class DocumentService {
-    private pdfParse: typeof import('pdf-parse') | null = null;
+    private PDFParse: typeof import('pdf-parse').PDFParse | null = null;
     private mammoth: typeof import('mammoth') | null = null;
 
-    // Lazy load pdf-parse
-    private async getPdfParse() {
-        if (!this.pdfParse) {
-            this.pdfParse = (await import('pdf-parse')).default;
+    // Lazy load pdf-parse (v2 uses PDFParse class)
+    private async getPDFParse() {
+        if (!this.PDFParse) {
+            const { PDFParse } = await import('pdf-parse');
+            this.PDFParse = PDFParse;
         }
-        return this.pdfParse;
+        return this.PDFParse;
     }
 
     // Lazy load mammoth
@@ -66,15 +67,17 @@ export class DocumentService {
     }
 
     private async parsePdfBuffer(buffer: Buffer): Promise<ParsedDocument> {
-        const pdfParse = await this.getPdfParse();
-        // pdf-parse exports default as the function
-        const parse = typeof pdfParse === 'function' ? pdfParse : (pdfParse as any).default;
-        const data = await parse(buffer);
+        const PDFParse = await this.getPDFParse();
+        // pdf-parse v2 uses class-based API with data option for buffers
+        // Convert Buffer to Uint8Array for compatibility
+        const parser = new PDFParse({ data: new Uint8Array(buffer) });
+        const textResult = await parser.getText();
+        const info = await parser.getInfo();
 
         return {
-            text: this.cleanText(data.text),
-            pageCount: data.numpages,
-            title: data.info?.Title,
+            text: this.cleanText(textResult.text),
+            pageCount: info.total,
+            title: (info.info as any)?.Title,
         };
     }
 
